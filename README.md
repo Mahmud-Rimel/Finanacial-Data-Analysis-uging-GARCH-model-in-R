@@ -1,0 +1,1 @@
+# Finanacial-Data-Analysis-uging-GARCH-model-in-R
