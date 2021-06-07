@@ -1,0 +1,437 @@
+---
+title: "Micrsoft Stock Price Analysis using GARCH model in R"
+author: "Mahmud Hasan"
+date: "1/06/2021"
+output:
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Dataset Description
+
+The motivation of this study is to analyze the nature of financial data. Therefore, we choose Microsoft financial data from  March 1986 to May 31,2021.Data is extracted from Yahoo Finance which is an open source Financial data provider.Dataset contains Microsoft Open, Close, High, Low, Volume and Adjusted prices. We collected about 36 years of Microsoft historical stock price. The goal of this project is to discover interesting facts of Microsoft Stock price and develop a suitable model for forecasting. 
+
+**Source**: [Microsoft Financial Data](https://finance.yahoo.com/quote/MSFT?p=MSFT&.tsrc=fin-srch)
+
+**Exploratory Analysis:**
+
+#### Require Library for loading and Analysis
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(quantmod)
+library(lmtest)
+library(dplyr)
+library(PerformanceAnalytics)
+library(ggplot2)
+library(xts)
+library(tidyverse)
+library("feasts") 
+library("fable") 
+library("lubridate")
+library("gridExtra")
+library(tseries)
+library(forecast)
+library(rugarch)
+
+```
+
+```{r,warrnings=FALSE, message=FALSE}
+getSymbols("MSFT", src="yahoo", periodicity = "daily", from = "1986-03-13", to = "2021-05-31")
+head(MSFT)
+```
+
+```{r}
+#Checking the missing values
+colSums(is.na(MSFT)) 
+```
+
+```{r,include=FALSE}
+Return_ <- c( diff(MSFT$MSFT.Close) / 
+               c(NA, MSFT$MSFT.Close[-length(MSFT$MSFT.Close)]))
+
+head(Return_)
+```
+
+```{r,include=FALSE}
+DR <-CalculateReturns(MSFT$MSFT.Close, method = 'log')
+```
+
+
+```{r}
+#Data Frame
+data <- cbind(
+  Price = MSFT$MSFT.Close,
+  Return=CalculateReturns(MSFT$MSFT.Close, method = 'log'))  #Calculating Returns and transform into log values
+colnames(data) <- c('Price','Return')
+head(data)
+```
+
+
+```{r,include=FALSE}
+#Checking class of data
+class(data)
+```
+
+
+```{r}
+plot(na.omit(data$Price), ylab='MSFT Closing Price',main='Microsoft Stock Price from 1986-2021',col='blue')
+```
+
+The time series plots depicts the price of Microsoft Stock Price.It shows the price of the stock increases over time even though the price shows volatility.Thus the stock price is not stationary over time due to changing mean and variance over time.
+
+```{r}
+plot(na.omit(data$Return),main='Return of MSFT')
+```
+
+The **Log of Return series** shows the Return series is stationary i.e. the mean and variance of Return series is constant over time.
+
+
+###  Checking the Stationarity of Price
+
+#### Augmented Dickey Fuller Test
+
+```{r}
+adf.test(na.omit(data$Price))
+```
+After applying the ADF to test on Price of the data, we see that the **P-value** is higher than 5% significant level i.e. **P-value** 0.99 > 0.05. Therefore, we can not reject the null hypothesis and conclude that the Price of the data is not stationary.
+
+### Checking the Stationarity of Return
+
+
+```{r}
+adf.test(na.omit(data$Return))
+```
+
+After applying the **ADF** to test on Return series, we see that the **P-value** is smaller than 5% significant level i.e. **P-value** 0.01 < 0.05. Therefore, we can reject the null hypothesis and conclude that the Retrun of the stock price is stationary.
+
+
+Most financial studies works on Return rather than Price. **Cambell, and Mackinlay (1997)** explained two main reasons for using Return. First, Return is a complete and scale-free summary of the investment.Second, Return series has most manageable statistical properties than Price. Return series has two key properties such as **Stationarity and Ergodicity**. Due to the advantages of Return, we proceed our analysis with Return.
+
+
+### Auto Correlation Function
+
+```{r}
+acf(na.omit(data$Return), lag.max = 40, main='ACF of Return Values',col='red')
+```
+
+From the **ACF** of the Return series, we do not  see any significant spikes outside  the blue lines except the one at **0** lag due to the series is correlated with itself.Therefore, we conclude that the Return series is not depends on previous days error.
+
+
+```{r}
+pacf(na.omit(data$Return), main='Partial Auto Correlation of Return Values',col='red')
+```
+
+The **PACF** of the Return series shows some significant spikes at 2,3,4 and 32 lags. From this we conclude that the Return series is Partially auto correlated with lags.We conclude that the Return series has influenced of previous days Return.
+
+
+### Stylized Facts of Financial Data
+
+- **Distributions of Returns is not normal**.
+- **Absence of significant auto correlation in returns**.
+- **Slowly decreasing auto correlation in squared or absolute returns**.
+- **Volatility clustering**.
+
+
+```{r,warning=FALSE}
+ggplot(aes(Return), data=data) + geom_histogram(bins = 100,col='black',fill='red') + ggtitle('Return of MSFt')
+
+```
+
+```{r}
+skewness(data$Return); kurtosis(data$Return)
+```
+
+The Skewness of the Return is **-0.5931499** and Kurtosis is **15.06746**. It depicts that the Return series is **negatively skewed** and follows **Leptokurtic distributions**.
+
+
+```{r,warning=FALSE}
+ggplot(data=data, aes(sample = Return)) +
+  stat_qq() +
+  stat_qq_line(col='red') + ggtitle('QQ plot of MSFT Returns')
+```
+
+
+### Normality Test
+```{r}
+jarque.bera.test(na.omit(data$Return))
+
+```
+
+The **P-value** of the **Jarque Bera Test** is smaller than 0.05 at 5% level of significance. Therefore, we can reject null hypothesis and conclude that the Return series is not normally distributed.
+
+
+### Absence of Auto Correlation
+
+```{r}
+Box.test(na.omit(data$Return), type = "Ljung-Box")
+```
+
+The **P-value** of the **Ljung-Box Test** is 0.09344.Therefore, we can reject the null hypothesis at 1% level of significance and make a conclusion that the Return series is not independent.
+
+
+### Absolute Return or Squared of Return are auto correlated.
+
+```{r, warning=FALSE}
+a<- ggAcf(abs(na.omit(data$Return)), col='red',main='Acf of Absolute Return of MSFT')
+p<- ggPacf(abs(na.omit(data$Return)),col='steelblue',main='PAcf of Absolute Return of MSFT')
+grid.arrange(a,p, ncol = 2, nrow = 1)
+
+```
+
+
+```{r,warning=FALSE}
+c <- ggAcf(na.omit(data$Return)^2, lag.max = 40, col='red', main='ACF of squared Return Values')
+d<- ggPacf(na.omit(data$Return)^2,lag.max = 40, col='steelblue',main= 'PACF of squared Return Values')
+grid.arrange(c,d, ncol = 2, nrow = 1)
+```
+
+Both **Absolute Return** series and **Squared Return** series show that Auto correlation is decaying very slowly.
+
+
+### Volatility Clustering
+
+Large changes of Return follow the large changes. Small changes follow small changes.
+
+
+
+```{r}
+chart.RollingPerformance(na.omit(data$Return),width = 22,FUN = 'sd.annualized',scale=252, main = 'Rolling 1 month Volatility')
+```
+
+Since our Return series is fail to follow the financial stylized facts. We may improve our ARIMA model by using GARCH (Generalized Auto Regressive Heteroskedasticity) model. 
+
+ 
+### GARCH Model
+
+The generalized Autoregressive conditional Heteroskedasticity (GARCH) process is an econometric term developed in 1982 by **Robert F. Engle**. GARCH describes an approach to estimate volatility in financial markets.GARCH process provides more real world view for predicting the returns of financial instruments than other model.
+
+
+#### Model 1: Fit ARMA(0,0)-gjrGARCH(1,1) model with Student t-distribution
+
+```{r}
+MSF_garch_1 <- ugarchspec(mean.model = list(armaOrder=c(0,0)),variance.model = list(model = 'eGARCH', 
+                          garchOrder = c(1, 1)),distribution = 'std')
+fit_garch_1 <- ugarchfit(spec = MSF_garch_1, data= na.omit(data$Return))
+fit_garch_1
+#fit_garch_1@model
+#fit_garch_1@fit
+```
+
+```{r warning=FALSE}
+plot(fit_garch_1,which='all')
+```
+
+#### Model 2: Fit ARMA(1,1)-gjrGARCH(1,1) model with Student t-distribution
+
+
+```{r}
+#egarch
+MSF_garch_2 <- ugarchspec(mean.model = list(armaOrder=c(1,1)),variance.model = list(model = 'eGARCH', 
+                                                                                  garchOrder = c(1, 1)),distribution = 'std')
+
+fit_garch_2 <- ugarchfit(spec = MSF_garch_2, data= na.omit(data$Return))
+
+fit_garch_2
+```
+```{r message=FALSE, warning=FALSE}
+plot(fit_garch_2,which='all')
+```
+
+#### Model 3: Fit ARMA(2,2)-gjrGARCH(1,1) model with Student t-distribution
+
+```{r}
+#egarch
+MSF_garch_3 <- ugarchspec(mean.model = list(armaOrder=c(2,2)),variance.model = list(model = 'eGARCH', 
+                                                                                  garchOrder = c(1, 1)),distribution = 'std')
+
+fit_garch_3 <- ugarchfit(spec = MSF_garch_3, data= na.omit(data$Return))
+fit_garch_3
+```
+
+```{r}
+plot(fit_garch_3,which='all')
+```
+
+#### Model 4: Fit ARMA(0,0)-eGARCH(1,2) model with Student t-distribution
+
+```{r}
+#egarch
+MSF_garch_4 <- ugarchspec(mean.model = list(armaOrder=c(1,2)),variance.model = list(model = 'eGARCH', 
+                                                                                  garchOrder = c(1, 1)),distribution = 'std')
+
+fit_garch_4 <- ugarchfit(spec = MSF_garch_4, data= na.omit(data$Return))
+fit_garch_4
+```
+
+```{r}
+plot(fit_garch_4,which='all')
+```
+
+#### Model 5: Fit ARMA(1,1)-eGARCH(2,1) model with Student t-distribution
+
+```{r}
+#egarch
+MSF_garch_5 <- ugarchspec(mean.model = list(armaOrder=c(2,1)),variance.model = list(model = 'eGARCH', 
+                                                                                  garchOrder = c(1, 1)),distribution = 'std')
+
+fit_garch_5 <- ugarchfit(spec = MSF_garch_5, data= na.omit(data$Return))
+fit_garch_5
+```
+
+```{r}
+plot(fit_garch_5,which='all')
+```
+
+#### Model 6: Fit ARMA(3,1)-eGARCH(1,1) model with Student t-distribution
+
+```{r}
+#egarch
+MSF_garch_6 <- ugarchspec(mean.model = list(armaOrder=c(3,1)),variance.model = list(model = 'eGARCH', 
+                                                                                  garchOrder = c(1, 1)),distribution = 'std')
+
+fit_garch_6 <- ugarchfit(spec = MSF_garch_6, data= na.omit(data$Return))
+fit_garch_6
+```
+```{r}
+plot(fit_garch_6,which='all')
+```
+
+#### Model 7: Fit ARMA(3,2)-eGARCH(1,1) model with Student t-distribution
+
+```{r}
+#egarch
+MSF_garch_7 <- ugarchspec(mean.model = list(armaOrder=c(3,2)),variance.model = list(model = 'eGARCH', 
+                                                                                  garchOrder = c(1, 1)),distribution = 'std')
+
+fit_garch_7 <- ugarchfit(spec = MSF_garch_7, data= na.omit(data$Return))
+fit_garch_7
+```
+
+#### Model 8: Fit ARMA(3,1)-eGARCH(1,1) model with Student t-distribution
+
+```{r}
+#egarch
+MSF_garch_8 <- ugarchspec(mean.model = list(armaOrder=c(1,3)),variance.model = list(model = 'eGARCH', 
+                                                                                  garchOrder = c(1, 1)),distribution = 'std')
+
+fit_garch_8 <- ugarchfit(spec = MSF_garch_8, data= na.omit(data$Return))
+fit_garch_8
+```
+
+
+
+
+```{r}
+Model = c('fit_garch_1','fit_garch_2','fit_garch_3','fit_garch_4','fit_garch_5','fit_garch_6','fit_garch_7','fit_garch_8')
+AIC = c(-5.2280,-5.2287,-5.2283,-5.2285,-5.2285,-5.2282,-5.2280,-5.2283)
+(model <- data.frame(Model,AIC))
+```
+```{r}
+which.min(model[,'AIC'])
+```
+### Model Selection
+
+**Based on Information Criterion among different models we selected ARMA(1,1) and GARCH(1,1)**.
+
+- All the coefficients of mean model of EGARCH are highly significant. 
+- The Coefficients of variance model are also highly significant. 
+- The Shape parameter is higly significant as **P value ** is smaller than 5% level of significance. Which suggest that choosing the   **Student   t** distribution is a good choice.
+- The variance model parameter $\alpha$ coefficient value is -0.024422 and $\gamma$ coefficient is 0.169540. It is evident that leverage    effect is exist and **Negative shocks** is larger than the impulse of **Positive shocks**.
+- The persistence of volatility is **0.9880358** .Volatility is said to be persistent if today’s return has a large effect on  the unconditional variance of many periods in the future.
+- All the **P-values** for the Ljung Box Test of residuals are > 0.05, thus indicating that there is no evidence of serial correlation in   the squared residuals. Hence it behaves as **White Noise**.
+
+
+#### The Selected Model
+
+
+```{r}
+fit_garch_2    #arma(1,1) & egarch(1,1)
+```
+
+```{r}
+persistence(fit_garch_2)    #Persistence of valatility
+```
+
+```{r}
+plot(fit_garch_2,which='all')   
+```
+
+
+
+**Convergence of the Model**
+
+```{r}
+print(convergence(fit_garch_2))   # The model converge
+```
+
+### Forecasting  
+
+```{r}
+for_cast1 <-ugarchforecast(fit_garch_2,data=data,n.ahead=20)
+for_cast1
+```
+
+#### Rolling Forecast
+
+```{r}
+fit_roll <- ugarchfit(MSF_garch_2, data= na.omit(data$Return),out.sample =500)
+fore_roll <- ugarchforecast(fit_roll, n.ahead=20, n.roll=50)
+fore_roll
+```
+```{r}
+par(mfrow=c(1,2))
+plot(fore_roll,which=1)
+plot(fore_roll,which=2)
+```
+
+```{r}
+par(mfrow=c(1,2))
+plot(fore_roll,which=3)
+plot(fore_roll,which=4)
+```
+
+```{r,include=FALSE}
+#preds <- as.data.frame(mod_egarch)
+#preds
+#e = (preds$Realized - preds$Mu)/preds$Realized
+#mean(abs(e))
+```
+
+#### Forecasting using Bootstrap 
+
+```{r}
+par(mfrow=c(1,2))
+fore_boot <- ugarchboot(fit_garch_5,data = na.omit(data$Return), method = c("Partial", "Full")[1], n.ahead = 20, n.bootpred = 500)
+plot(fore_boot,which=2)
+plot(fore_boot,which=3)
+```
+
+```{r}
+head(sigma(for_cast1))
+```
+
+```{r,include=FALSE}
+as.data.frame(fore_boot, which = "sigma", type = "q", qtile = c(0.01, 0.05))
+```
+
+
+
+### References
+
+
+- [Rugarch Package](https://cran.r-project.org/web/packages/rugarch/vignettes/Introduction_to_the_rugarch_package.pdf)
+
+- [Importance of GARCH model for Financial Data](https://stats.stackexchange.com/questions/314774/why-is-a-garch-model-useful)
+
+- [ARCH & GARCH model](https://online.stat.psu.edu/stat510/lesson/11/11.1)
+
+- [Explaination of GARCH Model](https://www.youtube.com/watch?v=inoBpq1UEn4)
+
+- [Stylized Facts of Financial Time Series](https://www.semanticscholar.org/paper/STYLIZED-FACTS-OF-FINANCIAL-TIME-SERIES-%3A-A-Jilla-Nayak/c7f3bb0650c14be3b83fc09b92f0b5d329a32410)
+
+- [Model Selection based on  IC](https://stats.stackexchange.com/questions/577/is-there-any-reason-to-prefer-the-aic-or-bic-over-the-other)
+
